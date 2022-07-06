@@ -23,13 +23,16 @@ def dct_matrix(n):
     return U
 
 
-def subsampled_dct_matrix(m, n):
+def subsampled_dct_matrix(m, n, rescale=None):
     """subsampled DCT matrix - rows chosen uniform at random without replacement."""
     p = m / n
     assert p <= 1
+
+    if rescale is None:
+        rescale = p**0.5
     m_new = np.random.binomial(n, p)
     indices = np.random.choice(n, m_new, replace=False).astype(int)
-    D = dct_matrix(n)[indices] / p**0.5
+    D = dct_matrix(n)[indices] / rescale
     return D
 
 
@@ -59,7 +62,10 @@ class GenerativeNetwork(nn.Module):
         self.first_layer = nn.Linear(k, m, bias=False)
         self.second_layer = nn.Linear(m, n, bias=False)
         # nn.init.kaiming_normal_(self.first_layer.weight)
-        nn.init.kaiming_normal_(self.second_layer.weight)
+        self.second_layer.weight.data = torch.randn((n, m)) / n**0.5
+
+        # nn.init.kaiming_normal_(self.second_layer.weight)
+        # nn.init.kaiming_normal_(self.first_layer.weight)
         self.eval()
         self.requires_grad_(False)
 
@@ -100,7 +106,7 @@ def coherence(network, U):
     numerators = torch.matmul(W2.T, U.T)
     denominators = torch.matmul(W2, numerators)
     return torch.max(
-        numerators.abs().pow(2).sum(dim=0) / torch.norm(denominators, dim=0)
+        numerators.pow(2).sum(dim=0) / torch.norm(denominators, dim=0)
     )
 
 
@@ -138,11 +144,13 @@ def gcs_problem_setup(k, m, n, t, noise_level=0.1, seed=None):
         torch.manual_seed(seed)
         np.random.seed(seed)
     z0 = torch.randn(1, k)  # ground truth latent code
-    A = torch.from_numpy(subsampled_dct_matrix(m, n)).float()
-    m_tilde = A.shape[0]  # actual number of rows
-    network = GenerativeNetwork(k, m_tilde, n).eval().requires_grad_(False)
-    network.interp(A, t)  # set second_layer to interpolant
+    W_dct = torch.from_numpy(subsampled_dct_matrix(m, n, 1.0)).float()
+    k_tilde = W_dct.shape[0]  # actual number of rows
+    network = GenerativeNetwork(k, k_tilde, n).eval().requires_grad_(False)
+    network.interp(W_dct, t)  # set second_layer to interpolant
     x0 = network(z0).view(-1)
+    A = torch.from_numpy(subsampled_dct_matrix(m, n)).float()
+    m_tilde = A.shape[0]
     b = torch.mv(A, x0)
     b = b + noise_level * torch.randn(m_tilde)
     return network, A, z0, x0, b
@@ -179,7 +187,7 @@ def gcs_recover(b, A, network, opt_tol=None, max_iter=None, verbose=False):
     if max_iter is None:
         max_iter = 12000
     if opt_tol is None:
-        opt_tol = 1e-6
+        opt_tol = 1e-4
     k = network.first_layer.weight.shape[1]
     z_hat = nn.Parameter(torch.randn(1, k), requires_grad=True)
     # criterion = nn.MSELoss(reduction="sum")
@@ -274,10 +282,91 @@ def run_experiment(
     return results
 
 
+def make_plots(dframe, agg_df, parms_string=None, savefig=False):
+    plt.style.use("/Users/aberk/code/theme_bw.mplstyle")
+    plt.rcParams["font.size"] = 14
+    plt.rcParams["lines.linewidth"] = 2
+    plt.rcParams["axes.labelsize"] = 14
+
+    # First plot(s): t vs. alpha and t vs. relative error
+    fig, ax = plt.subplots(2, 1, figsize=(8, 6))
+    ax[0].fill_between(
+        agg_df.index.values,
+        agg_df[("alpha", "mean")].values - agg_df[("alpha", "std")].values,
+        agg_df[("alpha", "mean")].values + agg_df[("alpha", "std")].values,
+        alpha=0.5,
+    )
+    ax[0].plot(agg_df.index.values, agg_df[("alpha", "mean")].values)
+    ax[1].fill_between(
+        agg_df.index.values,
+        agg_df[("rel_error", "mean")].values
+        - agg_df[("rel_error", "std")].values,
+        agg_df[("rel_error", "mean")].values
+        + agg_df[("rel_error", "std")].values,
+        alpha=0.5,
+    )
+    ax[1].plot(agg_df.index.values, agg_df[("rel_error", "mean")].values)
+    ax[0].set_xlabel("t")
+    ax[0].set_ylabel("alpha")
+    ax[1].set_xlabel("t")
+    ax[1].set_ylabel("relative error")
+    fig.tight_layout()
+    if savefig and isinstance(parms_string, str):
+        fig.savefig(
+            f"recovery_agg_{parms_string}.pdf",
+            bbox_inches="tight",
+        )
+    else:
+        plt.show()
+    plt.close("all")
+    del fig, ax
+
+    # Second plot: alpha vs. relative error
+    fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+    ax.scatter(dframe.alpha, dframe.rel_error, alpha=0.3)
+    ax.set_xlabel("alpha")
+    ax.set_ylabel("relative error")
+    ax.set_xscale("log")
+    fig.tight_layout()
+    if savefig and isinstance(parms_string, str):
+        fig.savefig(
+            f"recovery_scatter_{parms_string}.pdf",
+            bbox_inches="tight",
+        )
+    else:
+        plt.show()
+    plt.close("all")
+    del fig, ax
+
+
+def make_smoothed_plot():
+    """not used."""
+    from scipy.interpolate import RBFInterpolator
+
+    rbfi = RBFInterpolator(
+        all_results_df.alpha.values.reshape(-1, 1),
+        all_results_df.rel_error.values.ravel(),
+        kernel="multiquadric",
+        smoothing=1e-3,
+        epsilon=1,
+    )
+    alpha_vec = np.linspace(
+        all_results_df.alpha.min(), all_results_df.alpha.max(), 301
+    )
+    rel_error_pred = rbfi(alpha_vec.reshape(-1, 1))
+
+    fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+    ax.plot(all_results_df.alpha, all_results_df.rel_error, ".", alpha=0.5)
+    ax.plot(alpha_vec, rel_error_pred)
+    plt.show()
+    plt.close("all")
+    del fig, ax
+
+
 if __name__ == "__main__":
-    parms = {"k": 32, "m": 150, "n": 512}
-    n_reps = 21
-    t_vec = np.logspace(-0.2, 0, 31)
+    parms = {"k": 20, "m": 160, "n": 400}
+    n_reps, n_pts = 25, 31
+    t_vec = np.logspace(-0.2, 0, n_pts)
     all_results = [
         [
             run_experiment(**parms, t=t, noise_level=0.1, verbose=False)
@@ -285,15 +374,12 @@ if __name__ == "__main__":
         ]
         for _ in trange(n_reps)
     ]
-    all_results_df = [pd.DataFrame(results) for results in all_results]
-    fig, ax = plt.subplots(2, 1, figsize=(8, 6))
-    for results_df in all_results_df:
-        ax[0].plot(results_df.alpha, results_df.rel_error)
-        ax[1].plot(results_df.t, results_df.rel_error)
-    ax[0].set_xlabel("alpha upper bound")
-    ax[0].set_ylabel("relative error")
-    ax[1].set_xlabel("interp. param")
-    ax[1].set_ylabel("relative error")
-    plt.show()
-    plt.close("all")
-    del fig, ax
+    all_results_df = pd.concat(
+        [pd.DataFrame(results) for results in all_results]
+    )
+    agg_df = all_results_df.groupby(["t"]).agg(["mean", "std"])
+
+    parms_string = "k{k}_m{m}_n{n}_rep{n_reps}_T{n_pts}".format(
+        **parms, n_reps=n_reps, n_pts=n_pts
+    )
+    make_plots(all_results_df, agg_df, parms_string, savefig=True)
