@@ -334,7 +334,7 @@ def make_plots(dframe, agg_df, parms_string=None, savefig=False):
     ax.scatter(dframe.alpha, dframe.rel_error, alpha=0.3)
     ax.set_xlabel("alpha")
     ax.set_ylabel("relative error")
-    ax.set_xscale("log")
+    # ax.set_xscale("log")
     fig.tight_layout()
     if savefig and isinstance(parms_string, str):
         fig.savefig(
@@ -387,7 +387,7 @@ if __name__ == "__main__":
     )
     agg_df = all_results_df.groupby(["t"]).agg(["mean", "std"])
 
-    parms_string = "k{k}_m{m}_n{n}_rep{n_reps}_T{n_pts}".format(
+    parms_string = "W1mnist_k{k}_m{m}_n{n}_rep{n_reps}_T{n_pts}".format(
         **parms, n_reps=n_reps, n_pts=n_pts
     )
     make_plots(all_results_df, agg_df, parms_string, savefig=True)
