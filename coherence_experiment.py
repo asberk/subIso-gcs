@@ -52,7 +52,7 @@ class GenerativeNetwork(nn.Module):
         output dimension
     """
 
-    def __init__(self, k, m, n):
+    def __init__(self, k, m, n, mnist_layer=False):
         super().__init__()
         self.input_dimension = k
         self.width = m
@@ -66,6 +66,10 @@ class GenerativeNetwork(nn.Module):
 
         # nn.init.kaiming_normal_(self.second_layer.weight)
         # nn.init.kaiming_normal_(self.first_layer.weight)
+
+        if mnist_layer:
+            W1 = torch.load("data/first_layer_mnist.pt").requires_grad_(False)
+            self.first_layer.weight.data = W1[:m]
         self.eval()
         self.requires_grad_(False)
 
@@ -146,7 +150,11 @@ def gcs_problem_setup(k, m, n, t, noise_level=0.1, seed=None):
     z0 = torch.randn(1, k)  # ground truth latent code
     W_dct = torch.from_numpy(subsampled_dct_matrix(m, n, 1.0)).float()
     k_tilde = W_dct.shape[0]  # actual number of rows
-    network = GenerativeNetwork(k, k_tilde, n).eval().requires_grad_(False)
+    network = (
+        GenerativeNetwork(k, k_tilde, n, mnist_layer=True)
+        .eval()
+        .requires_grad_(False)
+    )
     network.interp(W_dct, t)  # set second_layer to interpolant
     x0 = network(z0).view(-1)
     A = torch.from_numpy(subsampled_dct_matrix(m, n)).float()
