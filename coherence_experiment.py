@@ -99,17 +99,10 @@ def coherence(network, U):
     If W2 = network.second_layer.weight, and U_i is the ith row of U viewed as a
     column vector, then this function returns:
 
-    max_i { norm(W2.T @ U_i)^2 / norm(W2 @ W2.T @ U_i) }
+    max_{i in [n]} { norm(Q.T @ U_i) }
+
+    where W2 = Q @ R is the QR decomposition of W2.
     """
-    W2 = network.second_layer.weight.detach()
-    numerators = torch.matmul(W2.T, U.T)
-    denominators = torch.matmul(W2, numerators)
-    return torch.max(
-        numerators.pow(2).sum(dim=0) / torch.norm(denominators, dim=0)
-    )
-
-
-def coherence2(network, U):
     W2 = network.second_layer.weight.detach()
     Q, _ = torch.linalg.qr(W2)
     return torch.max(torch.norm(torch.matmul(Q.T, U.T), dim=0))
@@ -233,7 +226,7 @@ def default_setup():
     seed = 2022
     z0, network = gcs_problem_setup(k, m, n, noise_level, seed)
     network.interp(beta)
-    U = dct_matrix(n)
+    U = torch.from_numpy(dct_matrix(n)).float()
 
 
 def run_experiment(
@@ -415,5 +408,4 @@ if __name__ == "__main__":
         **parms, n_reps=n_reps, n_pts=n_betas
     )
     make_plots(results_df, df_alpha, df_beta, parms_string, savefig=True)
-
     results_df.to_csv(f"data/dframe_{parms_string}.csv")
