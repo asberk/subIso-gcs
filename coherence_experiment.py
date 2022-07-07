@@ -52,7 +52,7 @@ class GenerativeNetwork(nn.Module):
         output dimension
     """
 
-    def __init__(self, k, m, n, mnist_layer=False):
+    def __init__(self, k, m, n, A, mnist_layer=False):
         super().__init__()
         self.input_dimension = k
         self.width = m
@@ -61,15 +61,15 @@ class GenerativeNetwork(nn.Module):
 
         self.first_layer = nn.Linear(k, m, bias=False)
         self.second_layer = nn.Linear(m, n, bias=False)
-        # nn.init.kaiming_normal_(self.first_layer.weight)
-        self.second_layer.weight.data = torch.randn((n, m)) / n**0.5
 
-        # nn.init.kaiming_normal_(self.second_layer.weight)
-        # nn.init.kaiming_normal_(self.first_layer.weight)
-
+        self.A = A.T
+        self.W = torch.randn((n, m)) / n**0.5
         if mnist_layer:
             W1 = torch.load("data/first_layer_mnist.pt").requires_grad_(False)
-            self.first_layer.weight.data = W1[:m]
+            W1_m = W1[:m]
+            self.first_layer.weight.data = W1_m / torch.linalg.svdvals(W1_m)[0]
+        else:
+            self.first_layer.weight.data = torch.randn((m, k)) / m**0.5
         self.eval()
         self.requires_grad_(False)
 
@@ -78,22 +78,17 @@ class GenerativeNetwork(nn.Module):
         out = self.second_layer(out)
         return out
 
-    def interp(self, M, t):
+    def interp(self, beta):
         """Sets second_layer weight matrix W2 to
-            Mt := (1 - t)*W2 + t*M.T
+            Mt := (1 - beta) * self.W + beta * self.A
 
         Parameters
         ----------
-        M: torch.Tensor
-            Matrix whose shape is the transpose of self.second_layer.weight
-        t: float
+        beta: float
             interpolation parameter in [0, 1]
         """
-        if not isinstance(M, torch.Tensor):
-            M = torch.from_numpy(M)
-
-        assert t >= 0 and t <= 1
-        Mt = (1 - t) * self.second_layer.weight.detach() + t * M.T
+        assert beta >= 0 and beta <= 1
+        Mt = (1 - beta) * self.W + beta * self.A
         self.second_layer.weight.data = Mt
 
 
@@ -114,7 +109,7 @@ def coherence(network, U):
     )
 
 
-def gcs_problem_setup(k, m, n, t, noise_level=0.1, seed=None):
+def gcs_problem_setup(k, m, n, noise_level=0.1, seed=None):
     """Set up a generative compressed sensing problem
 
     Parameters
@@ -125,8 +120,6 @@ def gcs_problem_setup(k, m, n, t, noise_level=0.1, seed=None):
         average number of measurements
     n: int
         ambient dimension of observed signal
-    t: float
-        interpolation parameter (see GenerativeNetwork.interp)
     noise_level: float
         standard deviation of measurement noise
     seed: int
@@ -151,17 +144,11 @@ def gcs_problem_setup(k, m, n, t, noise_level=0.1, seed=None):
     W_dct = torch.from_numpy(subsampled_dct_matrix(m, n, 1.0)).float()
     k_tilde = W_dct.shape[0]  # actual number of rows
     network = (
-        GenerativeNetwork(k, k_tilde, n, mnist_layer=True)
+        GenerativeNetwork(k, k_tilde, n, A=W_dct, mnist_layer=False)
         .eval()
         .requires_grad_(False)
     )
-    network.interp(W_dct, t)  # set second_layer to interpolant
-    x0 = network(z0).view(-1)
-    A = torch.from_numpy(subsampled_dct_matrix(m, n)).float()
-    m_tilde = A.shape[0]
-    b = torch.mv(A, x0)
-    b = b + noise_level * torch.randn(m_tilde)
-    return network, A, z0, x0, b
+    return z0, network
 
 
 def gcs_recover(b, A, network, opt_tol=None, max_iter=None, verbose=False):
@@ -195,7 +182,7 @@ def gcs_recover(b, A, network, opt_tol=None, max_iter=None, verbose=False):
     if max_iter is None:
         max_iter = 12000
     if opt_tol is None:
-        opt_tol = 1e-4
+        opt_tol = 1e-6
     k = network.first_layer.weight.shape[1]
     z_hat = nn.Parameter(torch.randn(1, k), requires_grad=True)
     # criterion = nn.MSELoss(reduction="sum")
@@ -242,7 +229,15 @@ def default_setup():
 
 
 def run_experiment(
-    k=10, m=50, n=200, t=0.0, noise_level=None, seed=None, verbose=False
+    k=10,
+    m=50,
+    n=200,
+    beta_min=0.5,
+    num_betas=31,
+    num_reps=25,
+    noise_level=None,
+    seed=None,
+    verbose=False,
 ):
     """Run a generative compressed sensing experiment with the given parameters.
     Parameters
@@ -250,7 +245,7 @@ def run_experiment(
     k: int
     m: int
     n: int
-    t: float
+    beta_min : float
     noise_level: float
     seed: int
     verbose: bool
@@ -260,37 +255,43 @@ def run_experiment(
     results: dict
         with keys: k, m, n, t, noise_level, alpha, recovery_error, rel_error, loss
     """
-    if verbose:
-        print(f"t {t:.3e}")
     if noise_level is None:
-        noise_level = 0.1
+        noise_level = 0.0
     U = torch.from_numpy(dct_matrix(n)).float()
-    network, A, z0, x0, b = gcs_problem_setup(
-        k, m, n, t, noise_level, seed=seed
-    )
-    z_hat, x_hat, b_hat, history = gcs_recover(b, A, network, verbose=verbose)
-    alpha = coherence(network, U)
-    recovery_error = torch.norm(x0.view(-1) - x_hat.view(-1))
-    rel_error = recovery_error / torch.norm(x0)
-    loss = torch.norm(b.view(-1) - b_hat.view(-1))
-
-    results = {
-        "k": k,
-        "m": m,
-        "n": n,
-        "t": t,
-        "noise_level": noise_level,
-        "alpha": alpha,
-        "error": recovery_error,
-        "rel_error": rel_error,
-        "loss": loss,
-        # "history": history,
-    }
+    z0, network = gcs_problem_setup(k, m, n, noise_level, seed=seed)
+    results = []
+    for ctr in trange(num_reps):
+        A = torch.from_numpy(subsampled_dct_matrix(m, n)).float()
+        for beta in np.linspace(beta_min, 1.0, num_betas):
+            network.interp(beta)
+            x0 = network(z0).view(-1)
+            b = torch.mv(A, x0) + noise_level * torch.randn(A.shape[0])
+            z_hat, x_hat, b_hat, history = gcs_recover(
+                b, A, network, verbose=verbose
+            )
+            alpha = coherence(network, U)
+            recovery_error = torch.norm(x0.view(-1) - x_hat.view(-1))
+            rel_error = recovery_error / torch.norm(x0)
+            loss = torch.norm(b.view(-1) - b_hat.view(-1))
+            results.append(
+                {
+                    "rep": ctr,
+                    "k": k,
+                    "m": m,
+                    "n": n,
+                    "noise_level": noise_level,
+                    "beta": beta,
+                    "alpha": alpha,
+                    "error": recovery_error,
+                    "rel_error": rel_error,
+                    "loss": loss,
+                }
+            )
 
     return results
 
 
-def make_plots(dframe, agg_df, parms_string=None, savefig=False):
+def make_plots(dframe, agg_alpha, agg_beta, parms_string=None, savefig=False):
     plt.style.use("/Users/aberk/code/theme_bw.mplstyle")
     plt.rcParams["font.size"] = 14
     plt.rcParams["lines.linewidth"] = 2
@@ -299,21 +300,21 @@ def make_plots(dframe, agg_df, parms_string=None, savefig=False):
     # First plot(s): t vs. alpha and t vs. relative error
     fig, ax = plt.subplots(2, 1, figsize=(8, 6))
     ax[0].fill_between(
-        agg_df.index.values,
-        agg_df[("alpha", "mean")].values - agg_df[("alpha", "std")].values,
-        agg_df[("alpha", "mean")].values + agg_df[("alpha", "std")].values,
+        agg_beta.index.values,
+        agg_beta[("alpha", "mean")].values - agg_beta[("alpha", "std")].values,
+        agg_beta[("alpha", "mean")].values + agg_beta[("alpha", "std")].values,
         alpha=0.5,
     )
-    ax[0].plot(agg_df.index.values, agg_df[("alpha", "mean")].values)
+    ax[0].plot(agg_beta.index.values, agg_beta[("alpha", "mean")].values)
     ax[1].fill_between(
-        agg_df.index.values,
-        agg_df[("rel_error", "mean")].values
-        - agg_df[("rel_error", "std")].values,
-        agg_df[("rel_error", "mean")].values
-        + agg_df[("rel_error", "std")].values,
+        agg_beta.index.values,
+        agg_beta[("rel_error", "mean")].values
+        - agg_beta[("rel_error", "std")].values,
+        agg_beta[("rel_error", "mean")].values
+        + agg_beta[("rel_error", "std")].values,
         alpha=0.5,
     )
-    ax[1].plot(agg_df.index.values, agg_df[("rel_error", "mean")].values)
+    ax[1].plot(agg_beta.index.values, agg_beta[("rel_error", "mean")].values)
     ax[0].set_xlabel("t")
     ax[0].set_ylabel("alpha")
     ax[1].set_xlabel("t")
@@ -334,7 +335,7 @@ def make_plots(dframe, agg_df, parms_string=None, savefig=False):
     ax.scatter(dframe.alpha, dframe.rel_error, alpha=0.3)
     ax.set_xlabel("alpha")
     ax.set_ylabel("relative error")
-    # ax.set_xscale("log")
+    ax.set_yscale("log")
     fig.tight_layout()
     if savefig and isinstance(parms_string, str):
         fig.savefig(
@@ -346,48 +347,63 @@ def make_plots(dframe, agg_df, parms_string=None, savefig=False):
     plt.close("all")
     del fig, ax
 
-
-def make_smoothed_plot():
-    """not used."""
-    from scipy.interpolate import RBFInterpolator
-
-    rbfi = RBFInterpolator(
-        all_results_df.alpha.values.reshape(-1, 1),
-        all_results_df.rel_error.values.ravel(),
-        kernel="multiquadric",
-        smoothing=1e-3,
-        epsilon=1,
-    )
-    alpha_vec = np.linspace(
-        all_results_df.alpha.min(), all_results_df.alpha.max(), 301
-    )
-    rel_error_pred = rbfi(alpha_vec.reshape(-1, 1))
-
+    # Third plot: alpha vs. relative error (fill_between)
     fig, ax = plt.subplots(1, 1, figsize=(8, 6))
-    ax.plot(all_results_df.alpha, all_results_df.rel_error, ".", alpha=0.5)
-    ax.plot(alpha_vec, rel_error_pred)
-    plt.show()
+    ax.fill_between(
+        agg_alpha.index.values,
+        agg_alpha[("rel_error", "P25")].values,
+        agg_alpha[("rel_error", "P50")].values,
+        agg_alpha[("rel_error", "P75")].values,
+        alpha=0.5,
+    )
+    ax.plot(agg_alpha.index.values, agg_alpha[("rel_error", "P50")].values)
+    ax.set_xlabel("coherence upper bound")
+    ax.set_ylabel("relative error")
+    ax.set_yscale("log")
+    fig.tight_layout()
+    if savefig and isinstance(parms_string, str):
+        fig.savefig(
+            f"recovery_quartiles_{parms_string}.pdf",
+            bbox_inches="tight",
+        )
+    else:
+        plt.show()
     plt.close("all")
     del fig, ax
 
 
-if __name__ == "__main__":
-    parms = {"k": 20, "m": 160, "n": 400}
-    n_reps, n_pts = 25, 31
-    t_vec = np.logspace(-0.2, 0, n_pts)
-    all_results = [
-        [
-            run_experiment(**parms, t=t, noise_level=0.1, verbose=False)
-            for t in t_vec
-        ]
-        for _ in trange(n_reps)
-    ]
-    all_results_df = pd.concat(
-        [pd.DataFrame(results) for results in all_results]
-    )
-    agg_df = all_results_df.groupby(["t"]).agg(["mean", "std"])
+def pctl(q):
+    return lambda x: np.percentile(x, q=q)
 
-    parms_string = "W1mnist_k{k}_m{m}_n{n}_rep{n_reps}_T{n_pts}".format(
-        **parms, n_reps=n_reps, n_pts=n_pts
+
+if __name__ == "__main__":
+    parms = {"k": 20, "m": 128, "n": 1024}
+    n_reps, n_betas = 20, 31
+    results = run_experiment(
+        **parms,
+        beta_min=0.5,
+        num_betas=n_betas,
+        num_reps=n_reps,
+        noise_level=0.0,
+        verbose=False,
     )
-    make_plots(all_results_df, agg_df, parms_string, savefig=True)
+    results_df = pd.DataFrame(results)
+    df_beta = results_df.groupby(["beta"]).agg(["mean", "std"])
+    df_alpha = (
+        results_df.groupby(results_df.alpha.apply(lambda x: x.item()))[
+            ["rel_error"]
+        ]
+        .agg([pctl(25), pctl(50), pctl(75)])
+        .rename(
+            columns={
+                "<lambda_0>": "P25",
+                "<lambda_1>": "P50",
+                "<lambda_2>": "P75",
+            }
+        )
+    )
+
+    parms_string = "new_k{k}_m{m}_n{n}_rep{n_reps}_T{n_pts}".format(
+        **parms, n_reps=n_reps, n_pts=n_betas
+    )
+    make_plots(results_df, df_alpha, df_beta, parms_string, savefig=True)
