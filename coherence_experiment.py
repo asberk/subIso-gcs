@@ -109,6 +109,12 @@ def coherence(network, U):
     )
 
 
+def coherence2(network, U):
+    W2 = network.second_layer.weight.detach()
+    Q, _ = torch.linalg.qr(W2)
+    return torch.max(torch.norm(torch.matmul(Q.T, U.T), dim=0))
+
+
 def gcs_problem_setup(k, m, n, noise_level=0.1, seed=None):
     """Set up a generative compressed sensing problem
 
@@ -219,13 +225,15 @@ def gcs_recover(b, A, network, opt_tol=None, max_iter=None, verbose=False):
 
 def default_setup():
     """Not a real function. Exists just to have this code written somewhere"""
-    k = 25
-    m = 200
-    n = 1000
-    t = 0.33
-    noise_level = 0.1
+    k = 20
+    m = 128
+    n = 1024
+    beta = 0.33
+    noise_level = 0.0
     seed = 2022
-    network, A, z0, x0, b = gcs_problem_setup(k, m, n, t, noise_level, seed)
+    z0, network = gcs_problem_setup(k, m, n, noise_level, seed)
+    network.interp(beta)
+    U = dct_matrix(n)
 
 
 def run_experiment(
@@ -322,7 +330,7 @@ def make_plots(dframe, agg_alpha, agg_beta, parms_string=None, savefig=False):
     fig.tight_layout()
     if savefig and isinstance(parms_string, str):
         fig.savefig(
-            f"recovery_agg_{parms_string}.pdf",
+            f"fig/recovery_agg_{parms_string}.pdf",
             bbox_inches="tight",
         )
     else:
@@ -339,7 +347,7 @@ def make_plots(dframe, agg_alpha, agg_beta, parms_string=None, savefig=False):
     fig.tight_layout()
     if savefig and isinstance(parms_string, str):
         fig.savefig(
-            f"recovery_scatter_{parms_string}.pdf",
+            f"fig/recovery_scatter_{parms_string}.pdf",
             bbox_inches="tight",
         )
     else:
@@ -363,7 +371,7 @@ def make_plots(dframe, agg_alpha, agg_beta, parms_string=None, savefig=False):
     fig.tight_layout()
     if savefig and isinstance(parms_string, str):
         fig.savefig(
-            f"recovery_quartiles_{parms_string}.pdf",
+            f"fig/recovery_quartiles_{parms_string}.pdf",
             bbox_inches="tight",
         )
     else:
@@ -403,7 +411,9 @@ if __name__ == "__main__":
         )
     )
 
-    parms_string = "new_k{k}_m{m}_n{n}_rep{n_reps}_T{n_pts}".format(
+    parms_string = "k{k}_m{m}_n{n}_rep{n_reps}_T{n_pts}".format(
         **parms, n_reps=n_reps, n_pts=n_betas
     )
     make_plots(results_df, df_alpha, df_beta, parms_string, savefig=True)
+
+    results_df.to_csv(f"data/dframe_{parms_string}.csv")
